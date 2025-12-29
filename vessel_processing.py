@@ -4,63 +4,27 @@ from scipy.spatial import KDTree
 
 class VesselProcessor:
     def __init__(self):
-        # Kalman Filter için state
-        self.kalman = None
-        self.kalman_initialized = False
-        self.prev_position = None
+        # Optical Flow tabanlı takip için state
+        self.frame_counter = 0
         self.tracking_confidence = 1.0
+
+        # ROI reference
+        self.original_roi = None
+        self.reference_roi_image = None
+        self.accumulated_offset = np.array([0.0, 0.0])  # Kümülatif offset
+
+        # Reset mekanizması
+        self.last_reset_frame = 0
+        self.reset_interval = 60  # Artırıldı: 40 -> 60 (daha az sıklıkta reset)
         
-    def _init_kalman_filter(self, initial_x, initial_y):
-        """Kalman Filter başlat - pozisyon ve hız takibi için"""
-        self.kalman = cv2.KalmanFilter(4, 2)  # 4 state (x, y, vx, vy), 2 measurement (x, y)
-        
-        # Transition matrix (pozisyon + hız modeli)
-        self.kalman.transitionMatrix = np.array([
-            [1, 0, 1, 0],  # x = x + vx
-            [0, 1, 0, 1],  # y = y + vy
-            [0, 0, 1, 0],  # vx = vx
-            [0, 0, 0, 1]   # vy = vy
-        ], dtype=np.float32)
-        
-        # Measurement matrix
-        self.kalman.measurementMatrix = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-        
-        # Process noise
-        self.kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-        
-        # Measurement noise
-        self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
-        
-        # Initial state
-        self.kalman.statePre = np.array([[initial_x], [initial_y], [0], [0]], dtype=np.float32)
-        self.kalman.statePost = np.array([[initial_x], [initial_y], [0], [0]], dtype=np.float32)
-        
-        self.kalman_initialized = True
-        
-    def _kalman_predict(self):
-        """Kalman ile sonraki pozisyonu tahmin et"""
-        if not self.kalman_initialized:
-            return None
-        prediction = self.kalman.predict()
-        return prediction[0, 0], prediction[1, 0]
-    
-    def _kalman_correct(self, measured_x, measured_y):
-        """Kalman'ı ölçümle düzelt"""
-        if not self.kalman_initialized:
-            return measured_x, measured_y
-        measurement = np.array([[measured_x], [measured_y]], dtype=np.float32)
-        corrected = self.kalman.correct(measurement)
-        return corrected[0, 0], corrected[1, 0]
-    
     def reset_tracking_state(self):
         """Takip durumunu sıfırla"""
-        self.kalman = None
-        self.kalman_initialized = False
-        self.prev_position = None
+        self.frame_counter = 0
         self.tracking_confidence = 1.0
+        self.original_roi = None
+        self.reference_roi_image = None
+        self.accumulated_offset = np.array([0.0, 0.0])
+        self.last_reset_frame = 0
     
     def extract_centerline(self, binary_image):
         kernel = np.ones((3, 3), np.uint8)
@@ -437,9 +401,9 @@ class VesselProcessor:
         # Sadece minimal düzeltme yap (damar merkezine)
         corrected_points = self._precise_vessel_center(curr_gray, base_centerline)
         
-        # Yoğunluk profili doğrulaması
+        # Yoğunluk profili doğrulaması (threshold artırıldı: 0.3 -> 0.55)
         if original_intensity_profile is not None:
-            if not self._validate_centerline(curr_gray, corrected_points, original_intensity_profile, threshold=0.3):
+            if not self._validate_centerline(curr_gray, corrected_points, original_intensity_profile, threshold=0.55):
                 # Doğrulama başarısız - orijinale dön (offset ile)
                 return base_centerline.copy(), True, (0, 0), (0, 0)
         
@@ -547,162 +511,156 @@ class VesselProcessor:
         
         return centerline_points, best_score if best_score > 0 else 0.0
     
-    def track_roi(self, prev_frame, curr_frame, roi, original_roi=None, max_drift=15, 
+    def track_roi(self, prev_frame, curr_frame, roi, original_roi=None, max_drift=35,
                    vessel_direction='vertical', centerline_points=None):
         """
-        GELİŞMİŞ HYBRİD TAKİP SİSTEMİ
-        
-        3 yöntem kombinasyonu:
-        1. Template Matching - ana takip
-        2. ECC Alignment - sub-pixel doğruluk  
-        3. Kalman Filter - tahmin ve düzeltme
+        OPTICAL FLOW MOTION COMPENSATION SİSTEMİ
+
+        Damarlar için optimize edilmiş takip:
+        1. Dense optical flow hesapla
+        2. Global motion'ı çıkar (kamera/doku hareketi)
+        3. ROI çevresindeki dominant motion'a göre takip et
+        4. Periyodik reset ile drift'i engelle
+
+        Bu yöntem damar içindeki kan akışından etkilenmez!
         """
         x, y, w, h = roi
-        
+
+        # Frame'leri gray'e çevir
         if len(prev_frame.shape) == 3:
             prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
         else:
             prev_gray = prev_frame
-        
+
         if len(curr_frame.shape) == 3:
             curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
         else:
             curr_gray = curr_frame
-        
+
         frame_h, frame_w = curr_gray.shape
-        
-        # Kalman Filter'ı başlat (ilk çağrıda)
-        if not self.kalman_initialized:
-            self._init_kalman_filter(float(x), float(y))
-        
-        # Damar yönünü centerline'dan hesapla
-        if centerline_points is not None and len(centerline_points) > 1:
-            first_pt = centerline_points[0]
-            last_pt = centerline_points[-1]
-            delta_y = abs(last_pt[0] - first_pt[0])
-            delta_x = abs(last_pt[1] - first_pt[1])
-            vessel_direction = 'vertical' if delta_y > delta_x else 'horizontal'
-        
-        # ==================== YÖNTEM 1: TEMPLATE MATCHING ====================
-        prev_roi = prev_gray[y:y+h, x:x+w]
-        
-        # Tüm yönlerde arama yap (vektör yönü sonra kontrol edilecek)
-        search_margin = 5
-        search_x1 = max(0, x - search_margin)
-        search_y1 = max(0, y - search_margin)
-        search_x2 = min(frame_w, x + w + search_margin)
-        search_y2 = min(frame_h, y + h + search_margin)
-        
-        search_area = curr_gray[search_y1:search_y2, search_x1:search_x2]
-        
-        if search_area.shape[0] < h or search_area.shape[1] < w:
+        self.frame_counter += 1
+
+        # İLK ÇAĞRI: Reference kaydet
+        if self.original_roi is None:
+            self.original_roi = original_roi if original_roi else roi
+            self.reference_roi_image = prev_gray[y:y+h, x:x+w].copy()
+
+        # İlk frame'de tracking yapma (prev == curr)
+        if self.frame_counter <= 1:
             return roi, (0, 0)
-        
-        result = cv2.matchTemplate(search_area, prev_roi, cv2.TM_CCOEFF_NORMED)
-        _, template_confidence, _, max_loc = cv2.minMaxLoc(result)
-        
-        template_x = float(search_x1 + max_loc[0])
-        template_y = float(search_y1 + max_loc[1])
-        template_dx = template_x - x
-        template_dy = template_y - y
-        
-        # ==================== YÖNTEM 2: ECC ALIGNMENT ====================
-        ecc_dx, ecc_dy = 0.0, 0.0
-        ecc_confidence = 0.0
-        
-        try:
-            warp_matrix = np.eye(2, 3, dtype=np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 1e-3)
-            curr_roi = curr_gray[y:y+h, x:x+w]
-            
-            if prev_roi.shape == curr_roi.shape and prev_roi.size > 0:
-                _, warp_matrix = cv2.findTransformECC(
-                    prev_roi.astype(np.float32), 
-                    curr_roi.astype(np.float32),
-                    warp_matrix, 
-                    cv2.MOTION_TRANSLATION,
-                    criteria
-                )
-                ecc_dx = -warp_matrix[0, 2]  # ECC ters yönde
-                ecc_dy = -warp_matrix[1, 2]
-                ecc_confidence = 0.8
-        except:
-            ecc_confidence = 0.0
-        
-        # ==================== YÖNTEM 3: KALMAN TAHMİN ====================
-        kalman_pred = self._kalman_predict()
-        kalman_dx, kalman_dy = 0.0, 0.0
-        kalman_confidence = 0.0
-        
-        if kalman_pred and self.prev_position is not None:
-            pred_x, pred_y = kalman_pred
-            kalman_dx = pred_x - self.prev_position[0]
-            kalman_dy = pred_y - self.prev_position[1]
-            kalman_confidence = 0.6
-        
-        # ==================== AĞIRLIKLI ORTALAMA ====================
-        total_weight = template_confidence + ecc_confidence + kalman_confidence
-        
-        if total_weight < 0.3:
+
+        # PERİYODİK RESET: Drift'i sıfırla
+        if (self.frame_counter - self.last_reset_frame) >= self.reset_interval:
+            self.accumulated_offset *= 0.7  # %30 azalt
+            self.last_reset_frame = self.frame_counter
+
+        # ==================== OPTICAL FLOW HESAPLAMA ====================
+        # ROI çevresinde daha geniş alan al (daha fazla context)
+        margin = 25  # Artırıldı: 15 -> 25
+        y1 = max(0, y - margin)
+        x1 = max(0, x - margin)
+        y2 = min(frame_h, y + h + margin)
+        x2 = min(frame_w, x + w + margin)
+
+        prev_region = prev_gray[y1:y2, x1:x2]
+        curr_region = curr_gray[y1:y2, x1:x2]
+
+        if prev_region.shape[0] < 30 or prev_region.shape[1] < 30:
             return roi, (0, 0)
-        
-        # Ağırlıklı hareket
-        weighted_dx = (template_dx * template_confidence + 
-                       ecc_dx * ecc_confidence + 
-                       kalman_dx * kalman_confidence) / total_weight
-        weighted_dy = (template_dy * template_confidence + 
-                       ecc_dy * ecc_confidence + 
-                       kalman_dy * kalman_confidence) / total_weight
-        
-        # Kan akışı yönündeki hareketi AZALT (tamamen yoksayma)
-        if vessel_direction == 'vertical':
-            weighted_dy *= 0.2  # Y hareketi %20'ye düşür
+
+        # Dense optical flow (Farneback) - Optimize edilmiş parametreler
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_region, curr_region, None,
+            pyr_scale=0.5,          # Pyramid scale
+            levels=4,               # Artırıldı: 3 -> 4 (daha multi-scale)
+            winsize=21,             # Artırıldı: 15 -> 21 (daha stabil)
+            iterations=5,           # Artırıldı: 3 -> 5 (daha doğru)
+            poly_n=7,              # Artırıldı: 5 -> 7 (daha smooth)
+            poly_sigma=1.5,         # Polynomial sigma
+            flags=0
+        )
+
+        # ==================== GLOBAL MOTION REMOVAL ====================
+        # Tüm bölgenin median flow'u = kamera/doku hareketi
+        median_flow_x = np.median(flow[..., 0])
+        median_flow_y = np.median(flow[..., 1])
+
+        # Global motion'ı çıkar
+        compensated_flow = flow.copy()
+        compensated_flow[..., 0] -= median_flow_x
+        compensated_flow[..., 1] -= median_flow_y
+
+        # ==================== ROI MOTION ESTIMATION ====================
+        # ROI'nin merkezinde dominant motion'a bak
+        roi_center_y = margin
+        roi_center_x = margin
+        roi_h_in_region = min(h, compensated_flow.shape[0] - roi_center_y)
+        roi_w_in_region = min(w, compensated_flow.shape[1] - roi_center_x)
+
+        if roi_h_in_region > 0 and roi_w_in_region > 0:
+            roi_flow = compensated_flow[
+                roi_center_y:roi_center_y+roi_h_in_region,
+                roi_center_x:roi_center_x+roi_w_in_region
+            ]
+
+            # ROI içindeki median flow = ROI'nin hareketi
+            roi_motion_x = np.median(roi_flow[..., 0])
+            roi_motion_y = np.median(roi_flow[..., 1])
         else:
-            weighted_dx *= 0.2  # X hareketi %20'ye düşür
-        
-        # Hareket çok küçükse
-        if abs(weighted_dx) < 0.3 and abs(weighted_dy) < 0.3:
-            return roi, (0, 0)
-        
-        # Yeni pozisyon
-        new_x = x + weighted_dx
-        new_y = y + weighted_dy
-        
-        # ==================== KALMAN DÜZELTME ====================
-        corrected_x, corrected_y = self._kalman_correct(new_x, new_y)
-        self.prev_position = (corrected_x, corrected_y)
-        
-        # Tek frame'de maksimum hareket (3 piksel)
-        final_dx = corrected_x - x
-        final_dy = corrected_y - y
-        max_frame_displacement = 3
-        
-        if abs(final_dx) > max_frame_displacement:
-            final_dx = max_frame_displacement if final_dx > 0 else -max_frame_displacement
-            corrected_x = x + final_dx
-        if abs(final_dy) > max_frame_displacement:
-            final_dy = max_frame_displacement if final_dy > 0 else -max_frame_displacement
-            corrected_y = y + final_dy
-        
-        # Orijinal ROI'den maksimum sapma kontrolü
-        if original_roi is not None:
-            orig_x, orig_y, _, _ = original_roi
-            total_drift_x = abs(corrected_x - orig_x)
-            total_drift_y = abs(corrected_y - orig_y)
-            
+            roi_motion_x = 0
+            roi_motion_y = 0
+
+        # ==================== MOTION FILTERING ====================
+        # Çok küçük hareketleri yoksay (noise)
+        if abs(roi_motion_x) < 0.3:  # Threshold düşürüldü: 0.5 -> 0.3
+            roi_motion_x = 0
+        if abs(roi_motion_y) < 0.3:
+            roi_motion_y = 0
+
+        # Çok büyük ani hareketleri sınırla
+        max_motion = 8  # Artırıldı: 5 -> 8 (daha hızlı hareket için)
+        roi_motion_x = np.clip(roi_motion_x, -max_motion, max_motion)
+        roi_motion_y = np.clip(roi_motion_y, -max_motion, max_motion)
+
+        # Accumulated offset güncelle
+        self.accumulated_offset[0] += roi_motion_x
+        self.accumulated_offset[1] += roi_motion_y
+
+        # ==================== YENİ ROI HESAPLAMA ====================
+        new_x = x + int(roi_motion_x)
+        new_y = y + int(roi_motion_y)
+
+        # Sınırları kontrol et
+        new_x = max(0, min(new_x, frame_w - w))
+        new_y = max(0, min(new_y, frame_h - h))
+
+        # ==================== DRIFT KONTROLÜ ====================
+        if original_roi is not None or self.original_roi is not None:
+            ref_roi = original_roi if original_roi else self.original_roi
+            orig_x, orig_y, _, _ = ref_roi
+
+            # Toplam drift
+            total_drift_x = abs(new_x - orig_x)
+            total_drift_y = abs(new_y - orig_y)
+
+            # Max drift aşıldı mı?
             if total_drift_x > max_drift or total_drift_y > max_drift:
-                self.reset_tracking_state()
-                self._init_kalman_filter(float(orig_x), float(orig_y))
-                self.prev_position = (float(orig_x), float(orig_y))
-                return original_roi, (0, 0)
-        
-        final_x = int(np.clip(corrected_x, 0, frame_w - w))
-        final_y = int(np.clip(corrected_y, 0, frame_h - h))
-        
-        # Güven skorunu güncelle
-        self.tracking_confidence = min(1.0, total_weight / 2.0)
-        
-        return (final_x, final_y, w, h), (final_dx, final_dy)
+                # Orijinale doğru smooth correction (daha yumuşak)
+                correction_strength = 0.3  # Azaltıldı: 0.5 -> 0.3
+                new_x = int(new_x - (new_x - orig_x) * correction_strength)
+                new_y = int(new_y - (new_y - orig_y) * correction_strength)
+
+                # Accumulated offset'i de düzelt
+                self.accumulated_offset *= 0.6  # Daha yumuşak: 0.5 -> 0.6
+                self.tracking_confidence *= 0.95  # Daha yumuşak: 0.9 -> 0.95
+            else:
+                # İyi gidiyor
+                self.tracking_confidence = min(1.0, self.tracking_confidence * 1.02)
+
+        dx = new_x - x
+        dy = new_y - y
+
+        return (new_x, new_y, w, h), (dx, dy)
     
     def _correct_to_vessel_center(self, gray_image, centerline_points, search_radius=5):
         corrected_points = []

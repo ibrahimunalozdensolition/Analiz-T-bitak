@@ -6,7 +6,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QFrame, QGridLayout, QScrollArea, QInputDialog,
-                            QProgressBar, QDialog, QMessageBox, QSlider)
+                            QProgressBar, QDialog, QMessageBox, QSlider, QSizePolicy, QCheckBox)
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
@@ -16,23 +16,25 @@ cv2.setLogLevel(0)
 from analysis_engine import SpaceTimeDiagramAnalyzer
 from utils import ResultsManager, HistogramGenerator
 from sam_processor import SAMVesselSegmenter, LightweightVesselSegmenter, create_vessel_segmenter, HybridVesselTracker, create_vessel_tracker
+from raft_stabilizer import RAFTStabilizer, RAFTVesselTracker
 
 class AnalysisThread(QThread):
     progress = Signal(int, int, str)
     finished = Signal(dict)
     error = Signal(str)
     
-    def __init__(self, video_path, roi, fps, pixel_to_um, centerline_points=None):
+    def __init__(self, video_path, roi, fps, pixel_to_um, centerline_points=None, use_raft_velocity=False):
         super().__init__()
         self.video_path = video_path
         self.roi = roi
         self.fps = fps
         self.pixel_to_um = pixel_to_um
         self.centerline_points = centerline_points
+        self.use_raft_velocity = use_raft_velocity
     
     def run(self):
         try:
-            analyzer = SpaceTimeDiagramAnalyzer(self.fps, self.pixel_to_um)
+            analyzer = SpaceTimeDiagramAnalyzer(self.fps, self.pixel_to_um, use_raft_velocity=self.use_raft_velocity)
             results = analyzer.analyze_video(
                 self.video_path, 
                 self.roi,
@@ -329,7 +331,6 @@ class EritrosidAnalyzer(QMainWindow):
 
         self.video_label = QLabel()
         self.video_label.setMinimumHeight(400)
-        from PySide6.QtWidgets import QSizePolicy
         self.video_label.setSizePolicy(
             QSizePolicy.Expanding,
             QSizePolicy.Expanding
@@ -368,6 +369,11 @@ class EritrosidAnalyzer(QMainWindow):
         self.live_btn.clicked.connect(self.toggle_live_preview)
         self.live_btn.setEnabled(False)
         button_layout.addWidget(self.live_btn)
+        
+        self.reset_btn = ModernButton("Reset Measurement")
+        self.reset_btn.clicked.connect(self.reset_measurement)
+        self.reset_btn.setEnabled(False)
+        button_layout.addWidget(self.reset_btn)
         
         button_layout.addStretch()
         video_layout.addLayout(button_layout)
@@ -498,8 +504,8 @@ class EritrosidAnalyzer(QMainWindow):
         right_scroll.setWidgetResizable(True)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        right_scroll.setMaximumWidth(310)
-        right_scroll.setMinimumWidth(280)
+        right_scroll.setMinimumWidth(320)
+        right_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_scroll.setStyleSheet("""
             QScrollArea {
                 border: none;
@@ -508,9 +514,10 @@ class EritrosidAnalyzer(QMainWindow):
         """)
 
         right_panel = QWidget()
+        right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setSpacing(8)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(5, 5, 5, 5)
         
         info_frame = QFrame()
         info_frame.setStyleSheet("""
@@ -587,6 +594,32 @@ class EritrosidAnalyzer(QMainWindow):
         self.frame_count_label.setStyleSheet("font-size: 17px; color: #616161; padding: 8px; font-weight: 600;")
         info_layout.addWidget(self.frame_count_label)
         
+        self.use_raft_checkbox = QCheckBox("RAFT Optical Flow")
+        self.use_raft_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 14px;
+                color: #424242;
+                padding: 8px;
+                font-weight: 600;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border: 2px solid #388E3C;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: white;
+                border: 2px solid #BDBDBD;
+                border-radius: 4px;
+            }
+        """)
+        self.use_raft_checkbox.setToolTip("RAFT derin ogrenme ile hiz hesapla (daha yuksek dogruluk)")
+        info_layout.addWidget(self.use_raft_checkbox)
+        
         info_layout.addStretch()
         right_layout.addWidget(info_frame)
         
@@ -627,15 +660,24 @@ class EritrosidAnalyzer(QMainWindow):
                 padding: 10px;
             }
         """)
-        count_layout = QHBoxLayout(count_frame)
+        count_layout = QVBoxLayout(count_frame)
+        count_layout.setSpacing(6)
         
+        count_row1 = QHBoxLayout()
         self.valid_label = QLabel("Valid: -")
-        self.valid_label.setStyleSheet("font-size: 15px; color: #4CAF50; font-weight: 600;")
-        count_layout.addWidget(self.valid_label)
+        self.valid_label.setStyleSheet("font-size: 14px; color: #4CAF50; font-weight: 600;")
+        count_row1.addWidget(self.valid_label)
         
         self.alias_label = QLabel("Aliasing: -")
-        self.alias_label.setStyleSheet("font-size: 15px; color: #FF9800; font-weight: 600;")
-        count_layout.addWidget(self.alias_label)
+        self.alias_label.setStyleSheet("font-size: 14px; color: #FF9800; font-weight: 600;")
+        count_row1.addWidget(self.alias_label)
+        count_row1.addStretch()
+        count_layout.addLayout(count_row1)
+        
+        self.direction_label = QLabel("Yon: -")
+        self.direction_label.setStyleSheet("font-size: 14px; color: #2196F3; font-weight: 600;")
+        self.direction_label.setWordWrap(True)
+        count_layout.addWidget(self.direction_label)
         
         results_layout.addWidget(count_frame)
         
@@ -732,7 +774,7 @@ class EritrosidAnalyzer(QMainWindow):
         # Sağ paneli scroll area'ya ekle
         right_scroll.setWidget(right_panel)
 
-        content_layout.addWidget(left_panel, 3)
+        content_layout.addWidget(left_panel, 2)
         content_layout.addWidget(right_scroll, 1)
         
         main_layout.addLayout(content_layout)
@@ -818,6 +860,7 @@ class EritrosidAnalyzer(QMainWindow):
                 self.current_frame = frame.copy()
                 self.display_frame(frame)
                 self.select_roi_btn.setEnabled(True)
+                self.reset_btn.setEnabled(True)
                 
                 self.frame_slider.setMaximum(self.total_frames - 1)
                 self.frame_slider.setValue(0)
@@ -876,6 +919,60 @@ class EritrosidAnalyzer(QMainWindow):
             self.scale_label.setText(f"Scale: {self.pixel_to_um} um/pixel")
             self.status_label.setText(f"Scale updated: {self.pixel_to_um} um/pixel")
     
+    def reset_measurement(self):
+        if self.is_live_playing:
+            self.toggle_live_preview()
+        
+        if hasattr(self, 'roi'):
+            delattr(self, 'roi')
+        if hasattr(self, 'live_roi'):
+            delattr(self, 'live_roi')
+        if hasattr(self, 'original_roi'):
+            delattr(self, 'original_roi')
+        
+        if hasattr(self, 'centerline_points'):
+            delattr(self, 'centerline_points')
+        if hasattr(self, 'live_centerline'):
+            delattr(self, 'live_centerline')
+        if hasattr(self, 'original_centerline'):
+            delattr(self, 'original_centerline')
+        if hasattr(self, 'vessel_mask'):
+            delattr(self, 'vessel_mask')
+        
+        if hasattr(self, 'raft_tracker') and self.raft_tracker is not None:
+            self.raft_tracker.reset()
+            self.raft_tracker = None
+        
+        self.analysis_results = None
+        
+        self.avg_speed_card.update_value("--")
+        self.median_speed_card.update_value("--")
+        self.std_speed_card.update_value("--")
+        self.min_speed_card.update_value("--")
+        self.max_speed_card.update_value("--")
+        self.valid_label.setText("Valid: --")
+        self.alias_label.setText("Aliasing: --")
+        
+        self.analyze_btn.setEnabled(False)
+        self.live_btn.setEnabled(False)
+        self.std_btn.setEnabled(False)
+        self.hist_btn.setEnabled(False)
+        self.csv_btn.setEnabled(False)
+        
+        self.current_frame_index = 0
+        if self.cap is not None:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame = frame.copy()
+                self.display_frame(frame)
+                self.frame_slider.setValue(0)
+                self.frame_info_label.setText(f"Frame: 1 / {self.total_frames}")
+                self.prev_frame_btn.setEnabled(False)
+                self.next_frame_btn.setEnabled(True if self.total_frames > 1 else False)
+        
+        self.status_label.setText("Olcum sifirlandi - Yeni ROI secebilirsiniz")
+    
     def prev_frame(self):
         if self.current_frame_index > 0:
             self.current_frame_index -= 1
@@ -925,64 +1022,7 @@ class EritrosidAnalyzer(QMainWindow):
                 
                 roi_image = self.current_frame[y:y+h, x:x+w].copy()
                 
-                method_choice = self._ask_segmentation_method()
-                
-                if method_choice == "sam":
-                    self._segment_with_sam(roi, roi_image)
-                elif method_choice == "classic":
-                    self._segment_with_classic(roi, roi_image)
-                else:
-                    self.status_label.setText("Islem iptal edildi")
-    
-    def _ask_segmentation_method(self):
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Segmentasyon Yontemi")
-        dialog.setMinimumWidth(400)
-        
-        layout = QVBoxLayout()
-        
-        info_label = QLabel("Damar tespiti icin yontem secin:")
-        info_label.setStyleSheet("font-size: 14px; font-weight: 600; margin-bottom: 10px;")
-        layout.addWidget(info_label)
-        
-        sam_btn = ModernButton("SAM (Segment Anything)", primary=True)
-        sam_btn.setToolTip("Yapay zeka tabanli - Daha dogru ama yavash (GPU onerilir)")
-        
-        classic_btn = ModernButton("Klasik Yontem")
-        classic_btn.setToolTip("Geleneksel goruntu isleme - Hizli")
-        
-        cancel_btn = ModernButton("Iptal")
-        
-        result = {"choice": None}
-        
-        def on_sam():
-            result["choice"] = "sam"
-            dialog.accept()
-        
-        def on_classic():
-            result["choice"] = "classic"
-            dialog.accept()
-        
-        def on_cancel():
-            result["choice"] = None
-            dialog.reject()
-        
-        sam_btn.clicked.connect(on_sam)
-        classic_btn.clicked.connect(on_classic)
-        cancel_btn.clicked.connect(on_cancel)
-        
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(sam_btn)
-        btn_layout.addWidget(classic_btn)
-        btn_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(btn_layout)
-        dialog.setLayout(layout)
-        
-        dialog.exec()
-        return result["choice"]
+                self._segment_with_classic(roi, roi_image)
     
     def _segment_with_sam(self, roi, roi_image):
         x, y, w, h = roi
@@ -1017,122 +1057,47 @@ class EritrosidAnalyzer(QMainWindow):
             self.progress_bar.setValue(40)
             QApplication.processEvents()
             
-            self._sam_interactive_segmentation(roi, roi_image, sam_segmenter)
+            h, w = roi_image.shape[:2]
+            center_points = [
+                [w // 2, h // 2],
+                [w // 2, h // 4],
+                [w // 2, 3 * h // 4]
+            ]
+            point_labels = [1, 1, 1]
+            
+            self.progress_bar.setValue(60)
+            QApplication.processEvents()
+            
+            mask, score = sam_segmenter.segment_vessel_with_points(roi_image, center_points, point_labels)
+            
+            self.progress_bar.setValue(80)
+            QApplication.processEvents()
+            
+            if mask is not None:
+                centerline_points = sam_segmenter.extract_centerline_from_mask(mask)
+                
+                if len(centerline_points) < 10:
+                    center_x = w // 2
+                    centerline_points = np.array([[row, center_x] for row in range(h)], dtype=np.int32)
+                
+                self.centerline_points = centerline_points
+                self.vessel_mask = mask
+                
+                self.progress_bar.setValue(100)
+                QApplication.processEvents()
+                self.progress_bar.setVisible(False)
+                
+                self.status_label.setText(f"SAM segmentasyon tamamlandi - Skor: {score:.2f}")
+                self._show_centerline_confirmation(roi, centerline_points, roi_image)
+            else:
+                self.progress_bar.setVisible(False)
+                QMessageBox.warning(self, "SAM Hatasi", "SAM segmentasyon basarisiz. Klasik yonteme geciliyor...")
+                self._segment_with_classic(roi, roi_image)
             
         except Exception as e:
             QMessageBox.warning(self, "SAM Hatasi", f"SAM hatasi: {str(e)}\n\nKlasik yonteme geciliyor...")
             self.progress_bar.setVisible(False)
             self._segment_with_classic(roi, roi_image)
-    
-    def _sam_interactive_segmentation(self, roi, roi_image, sam_segmenter):
-        x, y, w, h = roi
-        
-        display_img = roi_image.copy()
-        if len(display_img.shape) == 2:
-            display_img = cv2.cvtColor(display_img, cv2.COLOR_GRAY2BGR)
-        
-        selected_points = []
-        point_labels = []
-        current_mask = None
-        temp_display = display_img.copy()
-        
-        def mouse_callback(event, mx, my, flags, param):
-            nonlocal temp_display, selected_points, point_labels, current_mask
-            
-            if event == cv2.EVENT_LBUTTONDOWN:
-                selected_points.append([mx, my])
-                point_labels.append(1)
-                self._update_sam_display(display_img, selected_points, point_labels, current_mask, temp_display)
-                
-            elif event == cv2.EVENT_RBUTTONDOWN:
-                selected_points.append([mx, my])
-                point_labels.append(0)
-                self._update_sam_display(display_img, selected_points, point_labels, current_mask, temp_display)
-        
-        cv2.putText(temp_display, "SOL TIK: Damar sec | SAG TIK: Arka plan | S: Segment | ENTER: Onayla", 
-                   (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.imshow("SAM Segmentasyon", temp_display)
-        cv2.setMouseCallback("SAM Segmentasyon", mouse_callback)
-        
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            
-            if key == ord('s') or key == ord('S'):
-                if len(selected_points) > 0:
-                    self.status_label.setText("SAM segmentasyon yapiliyor...")
-                    self.progress_bar.setValue(60)
-                    QApplication.processEvents()
-                    
-                    mask, score = sam_segmenter.segment_vessel_with_points(
-                        roi_image, selected_points, point_labels
-                    )
-                    
-                    if mask is not None:
-                        current_mask = mask
-                        self._update_sam_display(display_img, selected_points, point_labels, current_mask, temp_display)
-                        self.status_label.setText(f"Segmentasyon tamamlandi - Skor: {score:.2f}")
-                    
-                    self.progress_bar.setValue(80)
-                    QApplication.processEvents()
-            
-            elif key == 13 or key == ord(' '):
-                if current_mask is not None:
-                    cv2.destroyWindow("SAM Segmentasyon")
-                    
-                    self.progress_bar.setValue(90)
-                    QApplication.processEvents()
-                    
-                    centerline_points = sam_segmenter.extract_centerline_from_mask(current_mask)
-                    
-                    if len(centerline_points) < 10:
-                        height, width = roi_image.shape[:2]
-                        center_x = width // 2
-                        centerline_points = np.array([[row, center_x] for row in range(height)], dtype=np.int32)
-                    
-                    self.centerline_points = centerline_points
-                    self.vessel_mask = current_mask
-                    
-                    self.progress_bar.setValue(100)
-                    QApplication.processEvents()
-                    self.progress_bar.setVisible(False)
-                    
-                    self._show_centerline_confirmation(roi, centerline_points, roi_image)
-                    break
-                else:
-                    cv2.putText(temp_display, "Once 'S' ile segment edin!", 
-                               (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                    cv2.imshow("SAM Segmentasyon", temp_display)
-            
-            elif key == ord('r') or key == ord('R'):
-                selected_points = []
-                point_labels = []
-                current_mask = None
-                temp_display = display_img.copy()
-                cv2.putText(temp_display, "SOL TIK: Damar sec | SAG TIK: Arka plan | S: Segment | ENTER: Onayla", 
-                           (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                cv2.imshow("SAM Segmentasyon", temp_display)
-            
-            elif key == 27 or key == ord('c') or key == ord('C'):
-                cv2.destroyWindow("SAM Segmentasyon")
-                self.progress_bar.setVisible(False)
-                self.status_label.setText("SAM segmentasyon iptal edildi")
-                break
-    
-    def _update_sam_display(self, original, points, labels, mask, temp_display):
-        temp_display[:] = original.copy()
-        
-        if mask is not None:
-            mask_colored = np.zeros_like(temp_display)
-            mask_colored[:, :, 1] = mask
-            temp_display[:] = cv2.addWeighted(temp_display, 0.7, mask_colored, 0.3, 0)
-        
-        for i, (pt, label) in enumerate(zip(points, labels)):
-            color = (0, 255, 0) if label == 1 else (0, 0, 255)
-            cv2.circle(temp_display, (int(pt[0]), int(pt[1])), 5, color, -1)
-        
-        cv2.putText(temp_display, "SOL TIK: Damar sec | SAG TIK: Arka plan | S: Segment | ENTER: Onayla", 
-                   (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.imshow("SAM Segmentasyon", temp_display)
     
     def _segment_with_classic(self, roi, roi_image):
         x, y, w, h = roi
@@ -1334,7 +1299,8 @@ class EritrosidAnalyzer(QMainWindow):
             self.roi,
             self.fps,
             self.pixel_to_um,
-            centerline_points=getattr(self, 'centerline_points', None)
+            centerline_points=getattr(self, 'centerline_points', None),
+            use_raft_velocity=self.use_raft_checkbox.isChecked()
         )
         
         self.analysis_thread.progress.connect(self.update_progress)
@@ -1363,6 +1329,20 @@ class EritrosidAnalyzer(QMainWindow):
         self.valid_label.setText(f"Valid: {results.get('n_valid', 0)}")
         self.alias_label.setText(f"Aliasing: {results.get('n_alias', 0)}")
         
+        analysis_info = results.get('analysis_info', {})
+        dominant_dir = analysis_info.get('dominant_direction', 0)
+        dir_ratio = analysis_info.get('direction_ratio', 0) * 100
+        pos_count = analysis_info.get('positive_count', 0)
+        neg_count = analysis_info.get('negative_count', 0)
+        
+        if dominant_dir > 0:
+            dir_text = f"Yon: + ({pos_count}/{pos_count+neg_count}) %{dir_ratio:.0f}"
+        elif dominant_dir < 0:
+            dir_text = f"Yon: - ({neg_count}/{pos_count+neg_count}) %{dir_ratio:.0f}"
+        else:
+            dir_text = "Yon: -"
+        self.direction_label.setText(dir_text)
+        
         self.show_uzd_btn.setEnabled(True)
         self.show_histogram_btn.setEnabled(True)
         self.save_csv_btn.setEnabled(True)
@@ -1371,22 +1351,24 @@ class EritrosidAnalyzer(QMainWindow):
         self.select_roi_btn.setEnabled(True)
         self.load_btn.setEnabled(True)
         
-        self.status_label.setText(
-            f"Analysis completed - {results.get('n_valid', 0)} valid measurements | "
-            f"Average: {results.get('mean', 0):.1f} um/s"
-        )
+        if results.get('insufficient_data', False):
+            self.status_label.setText(
+                f"Yetersiz veri - Valid olcum sayisi ({results.get('n_valid', 0)}) 8'in altinda, degerler sifirlandi"
+            )
+        else:
+            dir_symbol = "+" if analysis_info.get('dominant_direction', 0) > 0 else "-"
+            method = analysis_info.get('velocity_method', 'std_hough')
+            method_name = "RAFT" if 'raft' in method else "STD+Hough"
+            self.status_label.setText(
+                f"Analiz [{method_name}] - {results.get('n_valid', 0)} gecerli olcum ({dir_symbol} yon) | "
+                f"Ortalama: {results.get('mean', 0):.1f} um/s"
+            )
     
     def toggle_live_preview(self):
         if not self.is_live_playing:
             if not hasattr(self, 'roi') or self.video_path is None:
                 self.status_label.setText("Please load video and select ROI first")
                 return
-            
-            tracking_method = self._ask_tracking_method()
-            if tracking_method is None:
-                return
-            
-            self.use_sam_tracking = (tracking_method == "sam")
             
             self.is_live_playing = True
             self.live_btn.setText("Stop")
@@ -1401,65 +1383,41 @@ class EritrosidAnalyzer(QMainWindow):
             self.live_frame_count = 0
             self.live_roi = self.roi
             self.original_roi = self.roi
-            self.cumulative_displacement = (0, 0)
-            self.original_intensity_profile = None
             
             x, y, w, h = self.roi
             if len(self.current_frame.shape) == 3:
                 gray = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY)
             else:
                 gray = self.current_frame
+            
+            self.status_label.setText("RAFT stabilizer baslatiliyor...")
+            QApplication.processEvents()
+            
+            self.raft_tracker = RAFTVesselTracker()
+            if self.live_centerline is not None:
+                self.raft_tracker.set_centerline(self.live_centerline)
+            
+            self.prev_full_frame = gray.copy()
+            
             roi_frame_raw = gray[y:y+h, x:x+w].copy()
-            
-            if self.use_sam_tracking:
-                self.status_label.setText("SAM tracker baslatiliyor...")
-                QApplication.processEvents()
-                
-                self.hybrid_tracker = create_vessel_tracker(use_sam=True, sam_interval=5)
-                
-                initial_mask = getattr(self, 'vessel_mask', None)
-                initial_points = None
-                
-                if initial_mask is None and self.live_centerline is not None:
-                    initial_points = [[int(p[1]), int(p[0])] for p in self.live_centerline[::len(self.live_centerline)//5 + 1]]
-                
-                success = self.hybrid_tracker.initialize(roi_frame_raw, initial_points, initial_mask)
-                
-                if not success:
-                    QMessageBox.warning(self, "SAM Hatasi", "SAM tracker baslatılamadi. Klasik yonteme geciliyor.")
-                    self.use_sam_tracking = False
-                else:
-                    if self.hybrid_tracker.current_centerline is not None:
-                        self.live_centerline = self.hybrid_tracker.current_centerline.copy()
-                    self.status_label.setText("SAM tracker aktif - Her kare izleniyor")
-            
-            if not self.use_sam_tracking:
-                from vessel_processing import VesselProcessor
-                self.vessel_processor = VesselProcessor()
-                self.vessel_processor.reset_tracking_state()
-            
             roi_frame_blur = cv2.GaussianBlur(roi_frame_raw, (7, 7), 0)
             self.prev_live_frame = cv2.equalizeHist(roi_frame_blur)
             self.prev_live_frame_raw = roi_frame_raw.copy()
             
             interval = int(1000 / self.fps) if self.fps > 0 else 33
-            if self.use_sam_tracking:
-                interval = max(interval, 100)
             self.live_timer.start(interval)
             
             self.analyze_btn.setEnabled(False)
             self.select_roi_btn.setEnabled(False)
             self.load_btn.setEnabled(False)
-            
-            if not self.use_sam_tracking:
-                self.status_label.setText("Live preview started - Klasik takip aktif")
+            self.status_label.setText("Live preview started - RAFT stabilizer aktif")
         else:
             self.is_live_playing = False
             self.live_btn.setText("Live Preview")
             self.live_timer.stop()
             
-            if hasattr(self, 'hybrid_tracker') and self.hybrid_tracker is not None:
-                self.hybrid_tracker.reset()
+            if hasattr(self, 'raft_tracker') and self.raft_tracker is not None:
+                self.raft_tracker.reset()
             
             if hasattr(self, 'centerline_points') and self.centerline_points is not None:
                 self.live_centerline = self.centerline_points.copy()
@@ -1468,61 +1426,6 @@ class EritrosidAnalyzer(QMainWindow):
             self.select_roi_btn.setEnabled(True)
             self.load_btn.setEnabled(True)
             self.status_label.setText("Live preview stopped")
-    
-    def _ask_tracking_method(self):
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Takip Yontemi")
-        dialog.setMinimumWidth(450)
-        
-        layout = QVBoxLayout()
-        
-        info_label = QLabel("Live preview icin takip yontemi secin:")
-        info_label.setStyleSheet("font-size: 14px; font-weight: 600; margin-bottom: 10px;")
-        layout.addWidget(info_label)
-        
-        sam_btn = ModernButton("SAM AI Takip", primary=True)
-        sam_btn.setToolTip("Her kare icin SAM ile damar tespiti - Cok dogru ama yavas")
-        
-        classic_btn = ModernButton("Klasik Takip")
-        classic_btn.setToolTip("Optical Flow tabanli - Hizli ama kayabilir")
-        
-        cancel_btn = ModernButton("Iptal")
-        
-        result = {"choice": None}
-        
-        def on_sam():
-            result["choice"] = "sam"
-            dialog.accept()
-        
-        def on_classic():
-            result["choice"] = "classic"
-            dialog.accept()
-        
-        def on_cancel():
-            result["choice"] = None
-            dialog.reject()
-        
-        sam_btn.clicked.connect(on_sam)
-        classic_btn.clicked.connect(on_classic)
-        cancel_btn.clicked.connect(on_cancel)
-        
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(sam_btn)
-        btn_layout.addWidget(classic_btn)
-        btn_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        note_label = QLabel("Not: SAM takip her 5 karede tam inference yapar,\naradaki karelerde mask propagation kullanir.")
-        note_label.setStyleSheet("font-size: 11px; color: #757575; margin-top: 10px;")
-        layout.addWidget(note_label)
-        
-        dialog.setLayout(layout)
-        dialog.exec()
-        
-        return result["choice"]
     
     def update_live_frame(self):
         if not hasattr(self, 'roi'):
@@ -1553,15 +1456,18 @@ class EritrosidAnalyzer(QMainWindow):
             
             if hasattr(self, 'centerline_points') and self.centerline_points is not None:
                 self.live_centerline = self.centerline_points.copy()
-                
-            if getattr(self, 'use_sam_tracking', False) and hasattr(self, 'hybrid_tracker'):
-                initial_mask = getattr(self, 'vessel_mask', None)
-                initial_points = None
-                if initial_mask is None and self.live_centerline is not None:
-                    initial_points = [[int(p[1]), int(p[0])] for p in self.live_centerline[::len(self.live_centerline)//5 + 1]]
-                self.hybrid_tracker.initialize(roi_frame, initial_points, initial_mask)
+                self.original_centerline = self.centerline_points.copy()
             
-            self.cumulative_displacement = (0, 0)
+            if hasattr(self, 'raft_tracker') and self.raft_tracker is not None:
+                self.raft_tracker.reset()
+                if self.live_centerline is not None:
+                    self.raft_tracker.set_centerline(self.live_centerline)
+            
+            self.live_frame_count = 0
+            
+            self.status_label.setText("Video basa sarildi - RAFT resetlendi")
+            
+            self.display_frame(frame)
             return
         
         if len(frame.shape) == 3:
@@ -1569,167 +1475,45 @@ class EritrosidAnalyzer(QMainWindow):
         else:
             gray = frame
         
+        self._update_live_frame_raft(frame, gray)
+    
+    def _update_live_frame_raft(self, frame, gray):
         live_roi = getattr(self, 'live_roi', self.roi)
         x, y, w, h = live_roi
         
-        use_sam = getattr(self, 'use_sam_tracking', False)
-        
-        if use_sam and hasattr(self, 'hybrid_tracker'):
-            self._update_live_frame_sam(frame, gray, x, y, w, h)
-        else:
-            self._update_live_frame_classic(frame, gray, x, y, w, h)
-    
-    def _update_live_frame_sam(self, frame, gray, x, y, w, h):
-        curr_roi_raw = gray[y:y+h, x:x+w].copy()
-        
-        try:
-            mask, centerline, was_full_inference = self.hybrid_tracker.track_frame(curr_roi_raw)
-            
-            if centerline is not None and len(centerline) > 0:
-                self.live_centerline = centerline.copy()
-            
-            self.live_frame_count = getattr(self, 'live_frame_count', 0) + 1
-            
-            curr_roi = cv2.GaussianBlur(curr_roi_raw, (7, 7), 0)
-            curr_roi = cv2.equalizeHist(curr_roi)
-            
-            flow = None
-            if self.prev_live_frame is not None:
-                flow = cv2.calcOpticalFlowFarneback(
-                    self.prev_live_frame, curr_roi, None,
-                    pyr_scale=0.5, levels=4, winsize=15,
-                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0
-                )
-                
-                global_flow_x = np.median(flow[..., 0])
-                global_flow_y = np.median(flow[..., 1])
-                flow[..., 0] -= global_flow_x
-                flow[..., 1] -= global_flow_y
-            
-            vis_frame = frame.copy()
-            cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            
-            if mask is not None:
-                mask_colored = np.zeros((h, w, 3), dtype=np.uint8)
-                mask_colored[:, :, 1] = mask
-                roi_vis = vis_frame[y:y+h, x:x+w]
-                vis_frame[y:y+h, x:x+w] = cv2.addWeighted(roi_vis, 0.7, mask_colored, 0.3, 0)
-            
-            if self.live_centerline is not None and len(self.live_centerline) > 0:
-                for i in range(len(self.live_centerline) - 1):
-                    pt1_y, pt1_x = self.live_centerline[i]
-                    pt2_y, pt2_x = self.live_centerline[i + 1]
-                    pt1 = (x + int(pt1_x), y + int(pt1_y))
-                    pt2 = (x + int(pt2_x), y + int(pt2_y))
-                    cv2.line(vis_frame, pt1, pt2, (255, 0, 0), 2)
-                
-                centerline_speeds = []
-                if flow is not None:
-                    step = max(1, len(self.live_centerline) // 15)
-                    for idx in range(0, len(self.live_centerline), step):
-                        pt = self.live_centerline[idx]
-                        pt_y, pt_x = int(pt[0]), int(pt[1])
-                        
-                        if 0 <= pt_y < flow.shape[0] and 0 <= pt_x < flow.shape[1]:
-                            fx, fy = flow[pt_y, pt_x]
-                            speed_pixels = np.sqrt(fx**2 + fy**2)
-                            
-                            if speed_pixels > 0.3:
-                                speed_um = speed_pixels * self.pixel_to_um * self.fps
-                                centerline_speeds.append(speed_um)
-                                
-                                start_point = (x + pt_x, y + pt_y)
-                                end_point = (int(x + pt_x + fx * 4), int(y + pt_y + fy * 4))
-                                cv2.arrowedLine(vis_frame, start_point, end_point, 
-                                              (0, 255, 255), 2, tipLength=0.4)
-                
-                if centerline_speeds:
-                    mean_speed = np.mean(centerline_speeds)
-                    cv2.putText(vis_frame, f"Hiz: {mean_speed:.0f} um/s", 
-                               (x + 5, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                               0.7, (0, 255, 255), 2)
-            
-            inference_text = "SAM" if was_full_inference else "Prop"
-            cv2.putText(vis_frame, f"[{inference_text}]", 
-                       (x + 5, y + h - 10), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.5, (0, 255, 0), 1)
-            
-            self.display_frame(vis_frame)
-            
-            current_frame_num = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            status_text = f"SAM Live: Frame {current_frame_num}/{self.total_frames}"
-            if was_full_inference:
-                status_text += " | SAM inference yapildi"
-            self.status_label.setText(status_text)
-            
-        except Exception as e:
-            print(f"SAM live frame hatasi: {e}")
-        
-        curr_roi = cv2.GaussianBlur(curr_roi_raw, (7, 7), 0)
-        self.prev_live_frame = cv2.equalizeHist(curr_roi)
-        self.prev_live_frame_raw = curr_roi_raw.copy()
-        self.prev_full_frame = gray.copy()
-    
-    def _update_live_frame_classic(self, frame, gray, x, y, w, h):
-        live_roi = getattr(self, 'live_roi', self.roi)
-        x, y, w, h = live_roi
-        
-        if hasattr(self, 'prev_full_frame') and hasattr(self, 'vessel_processor'):
-            original_roi = getattr(self, 'original_roi', self.roi)
-            centerline = getattr(self, 'original_centerline', None)
-            new_roi, roi_displacement = self.vessel_processor.track_roi(
-                self.prev_full_frame, gray, live_roi,
-                original_roi=original_roi, max_drift=35,
-                centerline_points=centerline
+        if hasattr(self, 'prev_full_frame') and hasattr(self, 'raft_tracker') and self.raft_tracker is not None:
+            new_roi, displacement, updated_centerline = self.raft_tracker.track(
+                self.prev_full_frame, gray, live_roi
             )
             self.live_roi = new_roi
             x, y, w, h = new_roi
+            
+            if updated_centerline is not None:
+                self.live_centerline = updated_centerline
         
         curr_roi_raw = gray[y:y+h, x:x+w].copy()
         curr_roi = cv2.GaussianBlur(curr_roi_raw, (7, 7), 0)
         curr_roi = cv2.equalizeHist(curr_roi)
         
+        self.live_frame_count = getattr(self, 'live_frame_count', 0) + 1
+        
         if self.prev_live_frame is not None:
             try:
-                if hasattr(self, 'live_centerline') and self.live_centerline is not None and hasattr(self, 'prev_live_frame_raw') and hasattr(self, 'vessel_processor'):
-                    self.live_frame_count = getattr(self, 'live_frame_count', 0) + 1
-                    cum_disp = getattr(self, 'cumulative_displacement', (0, 0))
-                    orig_profile = getattr(self, 'original_intensity_profile', None)
-                    
-                    original_roi = getattr(self, 'original_roi', self.roi)
-                    roi_offset_x = x - original_roi[0]
-                    roi_offset_y = y - original_roi[1]
-                    
-                    self.live_centerline, was_redetected, displacement, new_cum_disp = self.vessel_processor.track_centerline(
-                        self.prev_live_frame_raw, curr_roi_raw, self.live_centerline,
-                        frame_count=self.live_frame_count,
-                        original_centerline=getattr(self, 'original_centerline', None),
-                        redetect_interval=30,
-                        cumulative_displacement=cum_disp,
-                        original_intensity_profile=orig_profile,
-                        roi_offset=(roi_offset_y, roi_offset_x)
-                    )
-                    self.cumulative_displacement = new_cum_disp
-                    
-                    if was_redetected:
-                        self.cumulative_displacement = (0, 0)
+                flow = self.raft_tracker.stabilizer.compute_flow(self.prev_live_frame, curr_roi)
                 
-                flow = cv2.calcOpticalFlowFarneback(
-                    self.prev_live_frame, curr_roi, None,
-                    pyr_scale=0.5, levels=6, winsize=25,
-                    iterations=7, poly_n=7, poly_sigma=1.8, flags=0
-                )
-                
-                global_flow_x = np.median(flow[..., 0])
-                global_flow_y = np.median(flow[..., 1])
+                global_flow_x, global_flow_y = self.raft_tracker.stabilizer.get_global_motion(flow)
                 flow[..., 0] -= global_flow_x
                 flow[..., 1] -= global_flow_y
                 
-                flow[..., 0] = cv2.GaussianBlur(flow[..., 0], (9, 9), 0)
-                flow[..., 1] = cv2.GaussianBlur(flow[..., 1], (9, 9), 0)
-                
                 vis_frame = frame.copy()
                 cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                
+                original_roi = getattr(self, 'original_roi', self.roi)
+                drift_x = x - original_roi[0]
+                drift_y = y - original_roi[1]
+                cv2.putText(vis_frame, f"Drift: ({drift_x:.0f}, {drift_y:.0f})", 
+                           (x + 5, y + h - 10), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.5, (0, 255, 0), 1)
                 
                 active_centerline = self.live_centerline if hasattr(self, 'live_centerline') and self.live_centerline is not None else self.centerline_points
                 
@@ -1767,13 +1551,21 @@ class EritrosidAnalyzer(QMainWindow):
                                    (x + 5, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 
                                    0.7, (0, 255, 255), 2)
                 
+                cv2.putText(vis_frame, "[RAFT]", 
+                           (x + w - 60, y + h - 10), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.5, (255, 100, 0), 1)
+                
                 self.display_frame(vis_frame)
                 
                 current_frame_num = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-                roi_info = f"ROI: ({x},{y})" if hasattr(self, 'live_roi') else ""
-                self.status_label.setText(f"Live: Frame {current_frame_num}/{self.total_frames} | {roi_info} | Klasik takip")
+                cum_dx = self.raft_tracker.stabilizer.cumulative_dx
+                cum_dy = self.raft_tracker.stabilizer.cumulative_dy
+                self.status_label.setText(f"RAFT Live: Frame {current_frame_num}/{self.total_frames} | ROI: ({x},{y}) | Cum: ({cum_dx:.1f},{cum_dy:.1f})")
             except Exception as e:
-                pass
+                print(f"RAFT live frame hatasi: {e}")
+                vis_frame = frame.copy()
+                cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                self.display_frame(vis_frame)
         
         self.prev_live_frame = curr_roi.copy()
         self.prev_live_frame_raw = curr_roi_raw.copy()

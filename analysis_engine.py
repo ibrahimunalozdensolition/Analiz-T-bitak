@@ -2,10 +2,10 @@ import cv2
 import numpy as np
 from preprocessing import VideoPreprocessor
 from vessel_processing import VesselProcessor
-from raft_stabilizer import RAFTStabilizer, RAFTVesselTracker, RAFTVelocityCalculator
+from raft_stabilizer import RAFTStabilizer, RAFTVesselTracker
 
 class SpaceTimeDiagramAnalyzer:
-    def __init__(self, fps, pixel_to_um=1.832, use_raft_velocity=False):
+    def __init__(self, fps, pixel_to_um=1.832):
         self.fps = fps
         self.pixel_to_um = pixel_to_um
         self.preprocessor = VideoPreprocessor()
@@ -14,8 +14,6 @@ class SpaceTimeDiagramAnalyzer:
         self.std_image = None
         self.centerline_points = None
         self.analysis_info = {}
-        self.use_raft_velocity = use_raft_velocity
-        self.raft_velocity_calc = None
         
     def create_space_time_diagram(self, frames, centerline_points, track_vessel=True, roi_offsets=None):
         if len(frames) == 0 or len(centerline_points) == 0:
@@ -43,6 +41,7 @@ class SpaceTimeDiagramAnalyzer:
                     gray, original_centerline
                 )
             
+            # ROI offset'ini al
             roi_offset = roi_offsets[t] if roi_offsets and t < len(roi_offsets) else (0, 0)
             
             if track_vessel and prev_frame is not None and t > 0:
@@ -254,7 +253,7 @@ class SpaceTimeDiagramAnalyzer:
         prev_pts = None
         
         if progress_callback:
-            progress_callback(0, 100, "Starting RAFT stabilizer...")
+            progress_callback(0, 100, "RAFT stabilizer baslatiliyor...")
         
         self.raft_tracker = RAFTVesselTracker()
         if centerline_points is not None:
@@ -304,7 +303,7 @@ class SpaceTimeDiagramAnalyzer:
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
                 pct = int((frame_idx / total_frames) * 30)
-                progress_callback(pct, 100, f"Reading frames with RAFT... {frame_idx}/{total_frames}")
+                progress_callback(pct, 100, f"RAFT ile kareler okunuyor... {frame_idx}/{total_frames}")
         
         cap.release()
         
@@ -312,12 +311,12 @@ class SpaceTimeDiagramAnalyzer:
             return None
         
         if progress_callback:
-            progress_callback(35, 100, "Stabilizing frames...")
+            progress_callback(35, 100, "Frame stabilizasyonu yapiliyor...")
         
         frames = self.preprocessor.stabilize_roi_frames(frames)
         
         if progress_callback:
-            progress_callback(45, 100, "Detecting background mode...")
+            progress_callback(45, 100, "Arka plan modu tespit ediliyor...")
         
         self.preprocessor.detect_background_mode(frames)
         self.analysis_info['background_mode'] = self.preprocessor.background_mode
@@ -326,7 +325,7 @@ class SpaceTimeDiagramAnalyzer:
             self.preprocessor.compute_mean_image(frames)
         
         if progress_callback:
-            progress_callback(50, 100, "Processing frames...")
+            progress_callback(50, 100, "Kareler isleniyor...")
         
         processed_frames = []
         for i, frame in enumerate(frames):
@@ -335,10 +334,10 @@ class SpaceTimeDiagramAnalyzer:
             
             if progress_callback and i % 20 == 0:
                 pct = 50 + int((i / len(frames)) * 20)
-                progress_callback(pct, 100, f"Processing frames... {i+1}/{len(frames)}")
+                progress_callback(pct, 100, f"Kareler isleniyor... {i+1}/{len(frames)}")
         
         if progress_callback:
-            progress_callback(75, 100, "Extracting vessel centerline...")
+            progress_callback(75, 100, "Damar merkez cizgisi cikariliyor...")
         
         sample_frame = processed_frames[len(processed_frames)//2]
         centerline_points, skeleton, vessel_mask = self.vessel_processor.extract_centerline_from_roi(sample_frame)
@@ -349,7 +348,7 @@ class SpaceTimeDiagramAnalyzer:
         self.centerline_points = centerline_points
         
         if progress_callback:
-            progress_callback(85, 100, "Creating Space-Time Diagram...")
+            progress_callback(85, 100, "STD olusturuluyor...")
         
         std_image = self.create_space_time_diagram(processed_frames, centerline_points, 
                                                     track_vessel=True, roi_offsets=roi_offsets)
@@ -357,46 +356,24 @@ class SpaceTimeDiagramAnalyzer:
         if std_image is None:
             return None
         
-        if self.use_raft_velocity:
-            if progress_callback:
-                progress_callback(90, 100, "Calculating velocity with RAFT Optical Flow...")
-            
-            if self.raft_velocity_calc is None:
-                self.raft_velocity_calc = RAFTVelocityCalculator(self.fps, self.pixel_to_um)
-            
-            raft_velocities, raft_directions, raft_info = self.raft_velocity_calc.calculate_velocity_from_frames(
-                processed_frames, centerline_points, skip_frames=2
-            )
-            
-            self.analysis_info.update(raft_info)
-            self.analysis_info['velocity_method'] = 'raft_optical_flow'
-            
-            valid_speeds = raft_velocities
-            n_valid = len(valid_speeds)
-            n_alias = 0
-            valid_lines = []
-            
-        else:
-            if progress_callback:
-                progress_callback(95, 100, "Detecting lines with Hough Transform...")
-            
-            lines = self.detect_lines_hough(std_image)
-            
-            speeds, valid_lines, alias_lines = self.analyze_all_lines(lines)
-            
-            n_valid = 0
-            n_alias = 0
-            valid_speeds = []
-            
-            for speed in speeds:
-                is_alias, nyquist_limit = self.check_aliasing(speed, h)
-                if is_alias:
-                    n_alias += 1
-                else:
-                    n_valid += 1
-                    valid_speeds.append(speed)
-            
-            self.analysis_info['velocity_method'] = 'std_hough'
+        if progress_callback:
+            progress_callback(95, 100, "Hough Transform cizgi tespiti...")
+        
+        lines = self.detect_lines_hough(std_image)
+        
+        speeds, valid_lines, alias_lines = self.analyze_all_lines(lines)
+        
+        n_valid = 0
+        n_alias = 0
+        valid_speeds = []
+        
+        for speed in speeds:
+            is_alias, nyquist_limit = self.check_aliasing(speed, h)
+            if is_alias:
+                n_alias += 1
+            else:
+                n_valid += 1
+                valid_speeds.append(speed)
         
         if n_valid < 8:
             results = {
@@ -412,7 +389,7 @@ class SpaceTimeDiagramAnalyzer:
                 'p95': 0,
                 'n_valid': n_valid,
                 'n_alias': n_alias,
-                'n_total': len(valid_speeds),
+                'n_total': len(speeds),
                 'all_speeds': [],
                 'std_image': std_image,
                 'valid_lines': valid_lines,
@@ -426,7 +403,7 @@ class SpaceTimeDiagramAnalyzer:
         
         results['n_valid'] = n_valid
         results['n_alias'] = n_alias
-        results['n_total'] = len(valid_speeds)
+        results['n_total'] = len(speeds)
         results['all_speeds'] = valid_speeds
         results['std_image'] = std_image
         results['valid_lines'] = valid_lines

@@ -6,7 +6,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QFrame, QGridLayout, QScrollArea, QInputDialog,
-                            QProgressBar, QDialog, QMessageBox, QSlider, QSizePolicy, QCheckBox)
+                            QProgressBar, QDialog, QMessageBox, QSlider, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
@@ -23,18 +23,17 @@ class AnalysisThread(QThread):
     finished = Signal(dict)
     error = Signal(str)
     
-    def __init__(self, video_path, roi, fps, pixel_to_um, centerline_points=None, use_raft_velocity=False):
+    def __init__(self, video_path, roi, fps, pixel_to_um, centerline_points=None):
         super().__init__()
         self.video_path = video_path
         self.roi = roi
         self.fps = fps
         self.pixel_to_um = pixel_to_um
         self.centerline_points = centerline_points
-        self.use_raft_velocity = use_raft_velocity
     
     def run(self):
         try:
-            analyzer = SpaceTimeDiagramAnalyzer(self.fps, self.pixel_to_um, use_raft_velocity=self.use_raft_velocity)
+            analyzer = SpaceTimeDiagramAnalyzer(self.fps, self.pixel_to_um)
             results = analyzer.analyze_video(
                 self.video_path, 
                 self.roi,
@@ -593,32 +592,6 @@ class EritrosidAnalyzer(QMainWindow):
         self.frame_count_label = QLabel("Frame Count: -")
         self.frame_count_label.setStyleSheet("font-size: 17px; color: #616161; padding: 8px; font-weight: 600;")
         info_layout.addWidget(self.frame_count_label)
-        
-        self.use_raft_checkbox = QCheckBox("RAFT Optical Flow")
-        self.use_raft_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 14px;
-                color: #424242;
-                padding: 8px;
-                font-weight: 600;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                border: 2px solid #388E3C;
-                border-radius: 4px;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: white;
-                border: 2px solid #BDBDBD;
-                border-radius: 4px;
-            }
-        """)
-        self.use_raft_checkbox.setToolTip("RAFT derin ogrenme ile hiz hesapla (daha yuksek dogruluk)")
-        info_layout.addWidget(self.use_raft_checkbox)
         
         info_layout.addStretch()
         right_layout.addWidget(info_frame)
@@ -1299,8 +1272,7 @@ class EritrosidAnalyzer(QMainWindow):
             self.roi,
             self.fps,
             self.pixel_to_um,
-            centerline_points=getattr(self, 'centerline_points', None),
-            use_raft_velocity=self.use_raft_checkbox.isChecked()
+            centerline_points=getattr(self, 'centerline_points', None)
         )
         
         self.analysis_thread.progress.connect(self.update_progress)
@@ -1357,10 +1329,8 @@ class EritrosidAnalyzer(QMainWindow):
             )
         else:
             dir_symbol = "+" if analysis_info.get('dominant_direction', 0) > 0 else "-"
-            method = analysis_info.get('velocity_method', 'std_hough')
-            method_name = "RAFT" if 'raft' in method else "STD+Hough"
             self.status_label.setText(
-                f"Analiz [{method_name}] - {results.get('n_valid', 0)} gecerli olcum ({dir_symbol} yon) | "
+                f"Analiz tamamlandi - {results.get('n_valid', 0)} gecerli olcum ({dir_symbol} yon) | "
                 f"Ortalama: {results.get('mean', 0):.1f} um/s"
             )
     

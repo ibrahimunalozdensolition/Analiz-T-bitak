@@ -602,21 +602,35 @@ segment-anything>=1.0
 ### Kurulum Adımları
 
 ```bash
-# Virtual environment oluştur
+# 1. Repoyu klonla
+git clone https://github.com/ibrahimunalozdensolition/Analiz-T-bitak.git
+cd Analiz-T-bitak
+
+# 2. Virtual environment oluştur
 python3 -m venv venv
 
-# Aktive et
+# 3. Aktive et
 source venv/bin/activate  # Linux/macOS
 # veya
 .\venv\Scripts\activate   # Windows
 
-# Bağımlılıkları yükle
+# 4. Bağımlılıkları yükle
 pip install -r requirements.txt
-
-# SAM model dosyasını indir (opsiyonel, klasik yöntem de çalışır)
-# https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
-# Dosyayı proje klasörüne kopyala
 ```
+
+### SAM Model Kurulumu (Opsiyonel)
+
+SAM (Segment Anything Model) daha iyi damar segmentasyonu sağlar. Model dosyası büyük boyutlu (358 MB) olduğundan manuel indirilmelidir:
+
+```bash
+# SAM ViT-B model dosyasını indir
+curl -L -o sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+
+# veya wget ile:
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+```
+
+**Not:** SAM model olmadan da uygulama çalışır - klasik görüntü işleme yöntemleri otomatik olarak kullanılır.
 
 ---
 

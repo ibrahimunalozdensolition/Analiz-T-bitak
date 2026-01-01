@@ -1,0 +1,32 @@
+# SAM Model (büyük dosya - manuel indirilmeli)
+sam_vit_b_01ec64.pth
+*.pth
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Video dosyaları (büyük boyut)
+*.avi
+*.mp4
+*.mov
+
+# Çıktılar
+*.csv
+output/
+results/
+
